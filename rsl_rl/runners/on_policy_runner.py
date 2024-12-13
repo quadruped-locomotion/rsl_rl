@@ -265,9 +265,20 @@ class OnPolicyRunner:
             saved_dict["critic_obs_norm_state_dict"] = self.critic_obs_normalizer.state_dict()
         torch.save(saved_dict, path)
 
+        # Export model to ONNX
+        onnx_path = path.replace(".pt", "_actor.onnx")
+        model = self.alg.actor_critic.actor
+        n_obs = model[0].in_features
+        tensor_x = torch.randn(1, n_obs, device=self.device)
+
+        # Export the model
+        torch.onnx.export(model, (tensor_x,), onnx_path,
+            verbose=False, input_names=["input"], output_names=["output"])
+
         # Upload model to external logging service
         if self.logger_type in ["neptune", "wandb"]:
             self.writer.save_model(path, self.current_learning_iteration)
+            self.writer.save_model(onnx_path, self.current_learning_iteration)
 
     def load(self, path, load_optimizer=True):
         loaded_dict = torch.load(path)
