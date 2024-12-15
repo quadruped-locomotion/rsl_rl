@@ -273,7 +273,7 @@ class OnPolicyRunner:
 
         # Export the model
         torch.onnx.export(model, (tensor_x,), onnx_path,
-            verbose=False, input_names=["input"], output_names=["output"])
+            verbose=False, input_names=["observation"], output_names=["action"])
 
         # Upload model to external logging service
         if self.logger_type in ["neptune", "wandb"]:
