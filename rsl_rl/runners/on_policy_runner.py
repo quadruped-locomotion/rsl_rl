@@ -16,6 +16,7 @@ from rsl_rl.algorithms import PPO, Distillation
 from rsl_rl.env import VecEnv
 from rsl_rl.modules import (
     ActorCritic,
+    ActorCriticAttention,
     ActorCriticRecurrent,
     EmpiricalNormalization,
     StudentTeacher,
@@ -45,9 +46,15 @@ class OnPolicyRunner:
         else:
             raise ValueError(f"Training type not found for algorithm {self.alg_cfg['class_name']}.")
 
+        # evaluate the policy class
+        self.policy_class = eval(self.policy_cfg.pop("class_name"))
+        self.policy_class = eval('ActorCriticAttention')
+
         # resolve dimensions of observations
         obs, extras = self.env.get_observations()
         num_obs = obs.shape[1]
+        exteroception_dims = tuple([v.item() for v in extras["observations"]["meta"].squeeze()])
+        exteroception_offset = -exteroception_dims[0] * exteroception_dims[1] * 2
 
         # resolve type of privileged observations
         if self.training_type == "rl":
@@ -67,11 +74,18 @@ class OnPolicyRunner:
         else:
             num_privileged_obs = num_obs
 
-        # evaluate the policy class
-        policy_class = eval(self.policy_cfg.pop("class_name"))
-        policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
-            num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
+        policy: ActorCritic | ActorCriticAttention | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent | None = None
+
+        if self.policy_class is ActorCriticAttention:
+            policy = self.policy_class(
+                num_obs, exteroception_offset, exteroception_dims, num_privileged_obs, self.env.num_actions, **self.policy_cfg
+            ).to(self.device)
+        else:
+            policy = self.policy_class(
+                num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
+            )
+
+        policy.to(self.device)  # move policy to the device
 
         # resolve dimension of rnd gated state
         if "rnd_cfg" in self.alg_cfg and self.alg_cfg["rnd_cfg"] is not None:
@@ -537,3 +551,25 @@ class OnPolicyRunner:
         torch.distributed.init_process_group(backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size)
         # set device to the local rank
         torch.cuda.set_device(self.gpu_local_rank)
+
+    def obs_fn(self, obs, extras) -> torch.Tensor:
+        """Handle observations and add height scan if available."""
+
+        height_scan: Optional[torch.Tensor] = None
+
+        obs = obs.to(self.device)  # move observations to the device
+
+        if 'observations' in extras and 'exteroception' in extras['observations']:
+            height_scan = extras['observations']['exteroception'].to(self.device)
+
+        if self.policy_class is ActorCriticAttention:
+            if height_scan is None:
+                raise ValueError("Height scan is required for ActorCriticAttention policy.")
+            else:
+                obs = torch.nested.nested_tensor([obs.unsqueeze(-1).unsqueeze(-1), height_scan])
+                return obs
+        else:
+            if height_scan is not None:
+                height_scan = height_scan.reshape(obs.shape[0], -1)
+                obs = torch.cat((obs, height_scan), dim=1)  # add height scan to observations
+            return obs
