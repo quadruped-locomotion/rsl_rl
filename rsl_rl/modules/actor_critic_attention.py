@@ -21,7 +21,7 @@ class AttentionEncoder(nn.Module):
         exteroception_dims: tuple[int, int],
         out_dim: int,
         num_exteroception_history: int = 2,
-        hidden_dim: int = 128,
+        hidden_dim: int = 64,
         activation: str = "elu",
         conv_params: dict = {"kernel_size": 3, "stride": 3},
     ):
@@ -111,7 +111,7 @@ class AttentionEncoder(nn.Module):
         )  # (num_envs, num_exteroception_history, dim1, dim2)
 
         # Proprioception encoding
-        proprio_encoded = self.proprioception_encoder(proprioception)
+        proprio_encoded = self.activation(self.proprioception_encoder(proprioception))
 
         # Exteroception encoding
         extero_encoded = self.exteroception_encoder(exteroception) # (num_envs, hidden_dim, num_patches)
