@@ -23,7 +23,7 @@ class AttentionEncoder(nn.Module):
         num_exteroception_history: int = 2,
         hidden_dim: int = 64,
         activation: str = "elu",
-        conv_params: dict = {"kernel_size": 3, "stride": 3},
+        conv_params: dict = {"kernel_size": 5, "stride": 1, "padding": "same"},
     ):
         """Attention-based encoder for proprioception and exteroception data.
 
@@ -64,17 +64,17 @@ class AttentionEncoder(nn.Module):
             num_exteroception_history,
             hidden_dim,
             groups=1,
-            padding="valid",
             **conv_params,
         )
 
         # number of patches
-        assert (
-            exteroception_dims[-1] % conv_params["kernel_size"] == 0
-        ), "Exteroception dims must be divisible by kernel size"
-        assert (
-            exteroception_dims[-2] % conv_params["kernel_size"] == 0
-        ), "Exteroception dims must be divisible by kernel size"
+        if conv_params["padding"] != "same":
+            assert (
+                exteroception_dims[-1] % conv_params["kernel_size"] == 0
+            ), "Exteroception dims must be divisible by kernel size"
+            assert (
+                exteroception_dims[-2] % conv_params["kernel_size"] == 0
+            ), "Exteroception dims must be divisible by kernel size"
 
         # Dummy input to compute the output dimension
         dummy_input = torch.zeros(
@@ -95,7 +95,7 @@ class AttentionEncoder(nn.Module):
         self.att_K = nn.Linear(hidden_dim, hidden_dim) # 4, 2
         self.att_V = nn.Linear(hidden_dim, hidden_dim) #  # 4, 2
 
-        self.ffn = nn.Linear(hidden_dim, hidden_dim) # 2, 1
+        self.ffn = nn.Linear(hidden_dim * 2, hidden_dim) # 2, 1
         self.output_layer = nn.Linear(hidden_dim, out_dim)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -140,8 +140,11 @@ class AttentionEncoder(nn.Module):
         out = out.squeeze()  # (num_envs, hidden_dim)
 
         # Combine proprioception and exteroception encodings
-        out = out + proprio_encoded  # (num_envs, hidden_dim)
         out = nn.functional.normalize(out, dim=-1)  # Normalize the output across the last dimension
+        out = self.activation(out)
+
+        # Concatenate proprioception and exteroception encodings
+        out = torch.cat((proprio_encoded, out), dim=-1)  # (num_envs, hidden_dim + self.att_Q.out_features)
         out = self.activation(self.ffn(out))  # Apply activation function
         out = self.output_layer(out)  # (num_envs, out_dim)
         return out  # Final output shape: (num_envs, out_dim)
