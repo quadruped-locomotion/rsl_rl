@@ -48,13 +48,11 @@ class OnPolicyRunner:
 
         # evaluate the policy class
         self.policy_class = eval(self.policy_cfg.pop("class_name"))
-        self.policy_class = eval('ActorCriticAttention')
+        # self.policy_class = eval('ActorCriticAttention')
 
         # resolve dimensions of observations
         obs, extras = self.env.get_observations()
         num_obs = obs.shape[1]
-        exteroception_dims = tuple([v.item() for v in extras["observations"]["meta"].squeeze()])
-        exteroception_offset = -exteroception_dims[0] * exteroception_dims[1] * 2
 
         # resolve type of privileged observations
         if self.training_type == "rl":
@@ -77,6 +75,8 @@ class OnPolicyRunner:
         policy: ActorCritic | ActorCriticAttention | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent | None = None
 
         if self.policy_class is ActorCriticAttention:
+            exteroception_dims = tuple([v.item() for v in extras["observations"]["meta"].squeeze()])
+            exteroception_offset = -exteroception_dims[0] * exteroception_dims[1] * 2
             policy = self.policy_class(
                 num_obs, exteroception_offset, exteroception_dims, num_privileged_obs, self.env.num_actions, **self.policy_cfg
             ).to(self.device)

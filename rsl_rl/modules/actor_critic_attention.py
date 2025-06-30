@@ -23,7 +23,7 @@ class AttentionEncoder(nn.Module):
         num_exteroception_history: int = 2,
         hidden_dim: int = 64,
         activation: str = "elu",
-        conv_params: dict = {"kernel_size": 5, "stride": 1, "padding": "same"},
+        conv_params: dict = {"kernel_size": 3, "stride": 1, "padding": "same"},
     ):
         """Attention-based encoder for proprioception and exteroception data.
 
@@ -95,10 +95,12 @@ class AttentionEncoder(nn.Module):
         self.att_K = nn.Linear(hidden_dim, hidden_dim) # 4, 2
         self.att_V = nn.Linear(hidden_dim, hidden_dim) #  # 4, 2
 
+        self.att_scores: torch.Tensor | None = None  # Placeholder for attention scores
+
         self.ffn = nn.Linear(hidden_dim * 2, hidden_dim) # 2, 1
         self.output_layer = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, fast_attention: bool = False) -> torch.Tensor:
         proprioception: torch.Tensor = input[:, :self.exteroception_offset]  # (num_envs, num_proprioception_obs)
         exteroception: torch.Tensor = input[:, self.exteroception_offset:]  # (num_envs, num_exteroception_obs)
 
@@ -136,8 +138,22 @@ class AttentionEncoder(nn.Module):
         extero_V = self.att_V(extero_encoded).unsqueeze(1) # (num_envs, num_KV_heads = 1, num_patches, hidden_dim)
 
         # Compute attention scores
-        out = torch.nn.functional.scaled_dot_product_attention(proprio_Q, extero_K, extero_V, dropout_p=0.0)  # (num_envs, num_Q_heads = 1, target_seq_len = 1, hidden_dim)
-        out = out.squeeze()  # (num_envs, hidden_dim)
+        if fast_attention:
+            out = torch.nn.functional.scaled_dot_product_attention(proprio_Q, extero_K, extero_V, dropout_p=0.0)  # (num_envs, num_Q_heads = 1, target_seq_len = 1, hidden_dim)
+            out = out.squeeze()  # (num_envs, hidden_dim)
+        else:
+            # Compute attention scores using the standard method
+            att_scores = torch.matmul(proprio_Q, extero_K.transpose(-2, -1))
+            att_scores = att_scores / (extero_encoded.shape[-1] ** 0.5)  # Scale the scores
+            att_scores = torch.nn.functional.softmax(att_scores, dim=-1)  # Apply softmax to get attention weights
+
+            att_scores = att_scores * 0.0
+            idx = torch.randint(att_scores.shape[-1], att_scores.shape[:-1]).to(proprio_encoded.device)  # Random indices for attention
+            att_scores = att_scores.scatter_(-1, idx.unsqueeze(-1), 1.0)  # Set specific indices to 1.0
+
+            self.att_scores = att_scores
+            out = torch.matmul(att_scores, extero_V)  # (num_envs, num_Q_heads = 1, target_seq_len = 1, hidden_dim)
+            out = out.squeeze()  # (num_envs, hidden_dim)
 
         # Combine proprioception and exteroception encodings
         out = nn.functional.normalize(out, dim=-1)  # Normalize the output across the last dimension
@@ -160,6 +176,7 @@ class ActorCriticAttention(nn.Module):
         exteroception_dims: tuple[int, int],
         num_critic_obs: int,
         num_actions: int,
+        critic_hidden_dims=[256, 256, 256],
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
@@ -176,8 +193,19 @@ class ActorCriticAttention(nn.Module):
         # Policy
         self.actor = AttentionEncoder(num_actor_obs, exteroception_offset, exteroception_dims, num_actions, num_exteroception_history=2, hidden_dim=128)
 
+        mlp_input_dim_c = num_critic_obs
+
         # Value function
-        self.critic = AttentionEncoder(num_critic_obs, exteroception_offset, exteroception_dims, 1, num_exteroception_history=2, hidden_dim=128)
+        critic_layers = []
+        critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
+        critic_layers.append(activation)
+        for layer_index in range(len(critic_hidden_dims)):
+            if layer_index == len(critic_hidden_dims) - 1:
+                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], 1))
+            else:
+                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], critic_hidden_dims[layer_index + 1]))
+                critic_layers.append(activation)
+        self.critic = nn.Sequential(*critic_layers)
 
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
@@ -218,6 +246,8 @@ class ActorCriticAttention(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         mean = self.actor(observations)
+        self.att_scores = self.actor.att_scores  # Store attention scores for potential use
+
         # compute standard deviation
         if self.noise_std_type == "scalar":
             std = self.std.expand_as(mean)
