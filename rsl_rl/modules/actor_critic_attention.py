@@ -11,7 +11,7 @@ from torch.distributions import Normal
 
 from rsl_rl.utils import resolve_nn_activation
 
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 
 class AttentionEncoder(nn.Module):
     def __init__(
@@ -19,11 +19,10 @@ class AttentionEncoder(nn.Module):
         num_obs: int,
         exteroception_offset: int,
         exteroception_dims: tuple[int, int],
-        out_dim: int,
-        num_exteroception_history: int = 2,
+        grid_idx: torch.Tensor,
         hidden_dim: int = 64,
         activation: str = "elu",
-        conv_params: dict = {"kernel_size": 3, "stride": 1, "padding": "same"},
+        conv_params: dict = {"kernel_size": 5, "stride": 1, "padding": "same"}  # Default parameters for convolution,
     ):
         """Attention-based encoder for proprioception and exteroception data.
 
@@ -33,10 +32,9 @@ class AttentionEncoder(nn.Module):
             num_obs (int): Dimension of the proprioception input.
             exteroception_offset (int): Starting index of the exteroception in the input vector. We assume that the input will be a concatenation of proprioception and exteroception data.
             exteroception_dims (tuple[int, int]): Dimensions of the exteroception input (dim1, dim2).
-            out_dim (int): Dimension of the output. This is typically the number of actions for the actor or the value dimension for the critic.
             hidden_dim (int, optional): Dimension of the hidden layers. Defaults to 128.
             activation (str, optional): Activation function to use. Defaults to "elu".
-            conv_params (dict, optional): Parameters for the convolutional layer. Defaults to {'kernel_size': 3, 'stride': 3}.
+            conv_params (dict, optional): Parameters for the convolutional layer. Defaults to {'kernel_size': 5, 'stride': 1}.
 
         Raises:
             AssertionError: If the exteroception dimensions are not divisible by the kernel size.
@@ -50,121 +48,76 @@ class AttentionEncoder(nn.Module):
 
         self.exteroception_offset = exteroception_offset
         self.exteroception_dims = exteroception_dims
-        self.num_exteroception_history = num_exteroception_history
+        self.grid_idx = grid_idx  # The grid indices of the ray pattern
 
-        self.out_dim = out_dim
+        assert grid_idx.shape[0] == exteroception_dims[0] * exteroception_dims[1], \
+            f"Grid indices shape {grid_idx.shape} does not match exteroception dimensions {exteroception_dims}."
+        
+        assert conv_params["padding"] == "same", \
+            "Padding must be set to 'same' to ensure the output dimensions match the input dimensions \
+            for the convolutional layers."
 
         self.activation = resolve_nn_activation(activation)
-        self.proprioception_encoder = nn.Linear(exteroception_offset, hidden_dim) # * 2
+        self.proprioception_encoder = nn.Linear(exteroception_offset, hidden_dim)
 
-        assert num_exteroception_history > 0, "Exteroception history must be greater than 0."
-
-        # Compute patch size for exteroception
-        extero_conv = nn.Conv2d(
-            num_exteroception_history,
-            hidden_dim,
-            groups=1,
-            **conv_params,
-        )
-
-        # number of patches
-        if conv_params["padding"] != "same":
-            assert (
-                exteroception_dims[-1] % conv_params["kernel_size"] == 0
-            ), "Exteroception dims must be divisible by kernel size"
-            assert (
-                exteroception_dims[-2] % conv_params["kernel_size"] == 0
-            ), "Exteroception dims must be divisible by kernel size"
-
-        # Dummy input to compute the output dimension
-        dummy_input = torch.zeros(
-            7, num_exteroception_history, exteroception_dims[-2], exteroception_dims[-1]
-        )
-        dummy_output = extero_conv(dummy_input)
-        num_patches = dummy_output.shape[2] * dummy_output.shape[3]
-
-        self.exteroception_encoder = nn.Sequential(
-            extero_conv,
+        # Convolutional encoder for exteroception
+        self.conv = nn.Sequential(
+            nn.Conv2d(1, 16, **conv_params),
+            self.activation,
+            nn.Conv2d(16, hidden_dim - 2, **conv_params),
             self.activation,
             nn.Flatten(-2),  # Flatten the last two dimensions to get patches
-        )  # Output shape: (num_env, hidden_dim, num_patches)
+        )
 
-        self.position_encoder = nn.Embedding(num_patches, hidden_dim) # *4
+        self.num_patches = exteroception_dims[0] * exteroception_dims[1]
 
-        self.att_Q = nn.Linear(hidden_dim, hidden_dim) # 2, 2
-        self.att_K = nn.Linear(hidden_dim, hidden_dim) # 4, 2
-        self.att_V = nn.Linear(hidden_dim, hidden_dim) #  # 4, 2
+        self.attention = nn.MultiheadAttention(
+            embed_dim = hidden_dim,
+            num_heads = 16,
+            batch_first = True,
+        )
 
         self.att_scores: torch.Tensor | None = None  # Placeholder for attention scores
 
-        self.ffn = nn.Linear(hidden_dim * 2, hidden_dim) # 2, 1
-        self.output_layer = nn.Linear(hidden_dim, out_dim)
 
-    def forward(self, input: torch.Tensor, fast_attention: bool = False) -> torch.Tensor:
+
+    def forward(self, input: torch.Tensor, need_weights: bool) -> torch.Tensor:
         proprioception: torch.Tensor = input[:, :self.exteroception_offset]  # (num_envs, num_proprioception_obs)
         exteroception: torch.Tensor = input[:, self.exteroception_offset:]  # (num_envs, num_exteroception_obs)
+        num_envs = input.shape[0]
 
         # Fold exteroception by the number of history steps
         exteroception = exteroception.view(
             exteroception.shape[0],
-            self.num_exteroception_history,
-            self.exteroception_dims[0],
-            self.exteroception_dims[1],
+            1, # Height measurement channel
+            self.exteroception_dims[0], # Width
+            self.exteroception_dims[1], # Length
         )  # (num_envs, num_exteroception_history, dim1, dim2)
 
         # Proprioception encoding
         proprio_encoded = self.activation(self.proprioception_encoder(proprioception))
 
         # Exteroception encoding
-        extero_encoded = self.exteroception_encoder(exteroception) # (num_envs, hidden_dim, num_patches)
+        extero_encoded = self.conv(exteroception) # (num_envs, hidden_dim, num_patches)
         extero_encoded = extero_encoded.permute(0, 2, 1)  # (num_envs, num_patches, hidden_dim)
+        extero_encoded = torch.cat([self.grid_idx.expand(num_envs, -1, -1), extero_encoded], -1) # (num_envs, num_patches, hidden_dim + 2), add grid indices to the exteroception encoding
 
-        # Create position embeddings
-        num_envs = proprioception.shape[0]
-        num_patches = extero_encoded.shape[1]  # Number of patches from exteroception encoding
-        assert num_patches > 0, "Exteroception encoding must produce patches."
+        # Unsqueeze to add a target sequence length dimension for attention
+        proprio_encoded = proprio_encoded.unsqueeze(1)  # (num_envs, 1, hidden_dim)
 
-        position_indices = (
-            torch.arange(num_patches, device=proprio_encoded.device)
-            .unsqueeze(0)
-            .expand(num_envs, -1)
-        )  # (num_envs, num_patches)
-        
-        extero_encoded = extero_encoded + self.position_encoder(position_indices)  # (num_envs, num_patches, hidden_dim)
+        # Compute attention
+        att_output, self.att_scores = self.attention(
+            query = proprio_encoded,  # Query: (num_envs, 1, hidden_dim)
+            key   = extero_encoded,   # Key (num_envs, num_patches, hidden_dim)
+            value = extero_encoded,   # Value (num_envs, num_patches, hidden_dim)
+            need_weights=need_weights
+        ) # Output shape: (num_envs, 1, hidden_dim), (att_scores shape: (num_envs, 1, num_patches)
 
-        # Attention mechanism
-        proprio_Q = self.att_Q(proprio_encoded).unsqueeze(1).unsqueeze(1) # (num_envs, num_Q_heads = 1, target_seq_len = 1, hidden_dim)
-        extero_K = self.att_K(extero_encoded).unsqueeze(1) # (num_envs, num_KV_heads = 1, num_patches, hidden_dim)
-        extero_V = self.att_V(extero_encoded).unsqueeze(1) # (num_envs, num_KV_heads = 1, num_patches, hidden_dim)
+        out = torch.cat([att_output.squeeze(), proprioception], 1)
+        # Final output shape: (num_envs, hidden_dim + num_proprioception_obs)
 
-        # Compute attention scores
-        if fast_attention:
-            out = torch.nn.functional.scaled_dot_product_attention(proprio_Q, extero_K, extero_V, dropout_p=0.0)  # (num_envs, num_Q_heads = 1, target_seq_len = 1, hidden_dim)
-            out = out.squeeze()  # (num_envs, hidden_dim)
-        else:
-            # Compute attention scores using the standard method
-            att_scores = torch.matmul(proprio_Q, extero_K.transpose(-2, -1))
-            att_scores = att_scores / (extero_encoded.shape[-1] ** 0.5)  # Scale the scores
-            att_scores = torch.nn.functional.softmax(att_scores, dim=-1)  # Apply softmax to get attention weights
+        return out
 
-            att_scores = att_scores * 0.0
-            idx = torch.randint(att_scores.shape[-1], att_scores.shape[:-1]).to(proprio_encoded.device)  # Random indices for attention
-            att_scores = att_scores.scatter_(-1, idx.unsqueeze(-1), 1.0)  # Set specific indices to 1.0
-
-            self.att_scores = att_scores
-            out = torch.matmul(att_scores, extero_V)  # (num_envs, num_Q_heads = 1, target_seq_len = 1, hidden_dim)
-            out = out.squeeze()  # (num_envs, hidden_dim)
-
-        # Combine proprioception and exteroception encodings
-        out = nn.functional.normalize(out, dim=-1)  # Normalize the output across the last dimension
-        out = self.activation(out)
-
-        # Concatenate proprioception and exteroception encodings
-        out = torch.cat((proprio_encoded, out), dim=-1)  # (num_envs, hidden_dim + self.att_Q.out_features)
-        out = self.activation(self.ffn(out))  # Apply activation function
-        out = self.output_layer(out)  # (num_envs, out_dim)
-        return out  # Final output shape: (num_envs, out_dim)
-        
 
 
 class ActorCriticAttention(nn.Module):
@@ -174,9 +127,8 @@ class ActorCriticAttention(nn.Module):
         num_actor_obs: int,
         exteroception_offset: int,
         exteroception_dims: tuple[int, int],
-        num_critic_obs: int,
+        grid_idx: torch.Tensor,
         num_actions: int,
-        critic_hidden_dims=[256, 256, 256],
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
@@ -190,22 +142,26 @@ class ActorCriticAttention(nn.Module):
         super().__init__()
         activation = resolve_nn_activation(activation)
 
-        # Policy
-        self.actor = AttentionEncoder(num_actor_obs, exteroception_offset, exteroception_dims, num_actions, num_exteroception_history=2, hidden_dim=128)
+        self.encoder = AttentionEncoder(num_actor_obs, exteroception_offset, exteroception_dims, grid_idx, hidden_dim=64)
 
-        mlp_input_dim_c = num_critic_obs
+        # The encoder outputs a tensor of shape (num_envs, 64 + exteroception_offset)
+        self.actor = nn.Sequential(
+            self.encoder,
+            activation,
+            nn.Linear(64 + exteroception_offset, 256),
+            activation,
+            nn.Linear(256, num_actions),
+        )
 
-        # Value function
-        critic_layers = []
-        critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
-        critic_layers.append(activation)
-        for layer_index in range(len(critic_hidden_dims)):
-            if layer_index == len(critic_hidden_dims) - 1:
-                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], 1))
-            else:
-                critic_layers.append(nn.Linear(critic_hidden_dims[layer_index], critic_hidden_dims[layer_index + 1]))
-                critic_layers.append(activation)
-        self.critic = nn.Sequential(*critic_layers)
+        # The critic also uses the same encoder, but outputs a single value
+        # The input to the critic is the same as the actor, so we can reuse the encoder
+        self.critic = nn.Sequential(
+            self.encoder,
+            activation,
+            nn.Linear(64 + exteroception_offset, 256),
+            activation,
+            nn.Linear(256, 1),
+        )
 
         print(f"Actor MLP: {self.actor}")
         print(f"Critic MLP: {self.critic}")
