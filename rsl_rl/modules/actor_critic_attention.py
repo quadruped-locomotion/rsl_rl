@@ -150,6 +150,8 @@ class ActorCriticAttention(nn.Module):
             activation,
             nn.Linear(64 + exteroception_offset, 256),
             activation,
+            nn.Linear(256, 256),
+            activation,
             nn.Linear(256, num_actions),
         )
 
@@ -159,6 +161,8 @@ class ActorCriticAttention(nn.Module):
             self.encoder,
             activation,
             nn.Linear(64 + exteroception_offset, 256),
+            activation,
+            nn.Linear(256, 256),
             activation,
             nn.Linear(256, 1),
         )
