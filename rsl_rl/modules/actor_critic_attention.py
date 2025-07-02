@@ -41,10 +41,6 @@ class AttentionEncoder(nn.Module):
         """
         super().__init__()
         self.num_obs = num_obs
-        
-        if exteroception_offset < 0:
-            exteroception_offset += num_obs  # Allow negative indexing
-        assert 0 < exteroception_offset < num_obs, "exteroception_offset must be a valid index within the input vector."
 
         self.exteroception_offset = exteroception_offset
         self.exteroception_dims = exteroception_dims
@@ -81,7 +77,7 @@ class AttentionEncoder(nn.Module):
 
 
 
-    def forward(self, input: torch.Tensor, need_weights: bool) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, need_weights: bool = False) -> torch.Tensor:
         proprioception: torch.Tensor = input[:, :self.exteroception_offset]  # (num_envs, num_proprioception_obs)
         exteroception: torch.Tensor = input[:, self.exteroception_offset:]  # (num_envs, num_exteroception_obs)
         num_envs = input.shape[0]
@@ -141,6 +137,10 @@ class ActorCriticAttention(nn.Module):
             )
         super().__init__()
         activation = resolve_nn_activation(activation)
+
+        if exteroception_offset < 0:
+            exteroception_offset += num_actor_obs  # Allow negative indexing
+        assert 0 < exteroception_offset < num_actor_obs, "exteroception_offset must be a valid index within the input vector."
 
         self.encoder = AttentionEncoder(num_actor_obs, exteroception_offset, exteroception_dims, grid_idx, hidden_dim=64)
 
@@ -202,7 +202,7 @@ class ActorCriticAttention(nn.Module):
     def update_distribution(self, observations):
         # compute mean
         mean = self.actor(observations)
-        self.att_scores = self.actor.att_scores  # Store attention scores for potential use
+        self.att_scores = self.actor[0].att_scores  # Store attention scores for potential use
 
         # compute standard deviation
         if self.noise_std_type == "scalar":

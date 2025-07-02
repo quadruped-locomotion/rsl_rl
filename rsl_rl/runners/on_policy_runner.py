@@ -79,7 +79,7 @@ class OnPolicyRunner:
             grid_idx = extras["observations"]["meta"]["grid_idx"].squeeze()
             exteroception_offset = -exteroception_dims[0] * exteroception_dims[1]
             policy = self.policy_class(
-                num_obs, exteroception_offset, exteroception_dims, grid_idx, num_privileged_obs, self.env.num_actions, **self.policy_cfg
+                num_obs, exteroception_offset, exteroception_dims, grid_idx, self.env.num_actions, **self.policy_cfg
             ).to(self.device)
         else:
             policy = self.policy_class(
