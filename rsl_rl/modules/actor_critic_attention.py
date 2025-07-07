@@ -158,7 +158,6 @@ class ActorCriticAttention(nn.Module):
         # The critic also uses the same encoder, but outputs a single value
         # The input to the critic is the same as the actor, so we can reuse the encoder
         self.critic = nn.Sequential(
-            self.encoder,
             activation,
             nn.Linear(64 + exteroception_offset, 256),
             activation,
@@ -232,6 +231,9 @@ class ActorCriticAttention(nn.Module):
         return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):
+        with torch.no_grad():
+            critic_observations = self.encoder(critic_observations)
+
         value = self.critic(critic_observations)
         return value
 
