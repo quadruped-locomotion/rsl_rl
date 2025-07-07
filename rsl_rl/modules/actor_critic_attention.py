@@ -56,6 +56,10 @@ class AttentionEncoder(nn.Module):
         self.activation = resolve_nn_activation(activation)
         self.proprioception_encoder = nn.Linear(exteroception_offset, hidden_dim)
 
+        self.position_encoder = nn.Embedding(
+            num_embeddings = exteroception_dims[0] * exteroception_dims[1],
+            embedding_dim = hidden_dim)
+
         # Convolutional encoder for exteroception
         self.conv = nn.Sequential(
             nn.Conv2d(1, 16, **conv_params),
@@ -95,8 +99,17 @@ class AttentionEncoder(nn.Module):
 
         # Exteroception encoding
         extero_encoded = self.conv(exteroception) # (num_envs, hidden_dim, num_patches)
-        extero_encoded = extero_encoded.permute(0, 2, 1)  # (num_envs, num_patches, hidden_dim)
-        extero_encoded = torch.cat([self.grid_idx.expand(num_envs, -1, -1), extero_encoded], -1) # (num_envs, num_patches, hidden_dim + 2), add grid indices to the exteroception encoding
+        extero_encoded = extero_encoded.permute(0, 2, 1)  # (num_envs, num_patches, hidden_dim - 2)
+        extero_encoded = torch.cat([self.grid_idx.expand(num_envs, -1, -1), extero_encoded], -1) # (num_envs, num_patches, hidden_dim), add grid indices to the exteroception encoding
+
+        # Add positional encoding to exteroception
+        position_idx = torch.arange(
+            self.num_patches, device=extero_encoded.device, dtype=torch.long
+        )  # (num_patches,)
+        position_encoded = self.position_encoder(position_idx)  # (num_patches, hidden_dim)
+        position_encoded = position_encoded.unsqueeze(0).expand(num_envs, -1, -1)  # (num_envs, num_patches, hidden_dim)
+        # Add positional
+        extero_encoded = extero_encoded + position_encoded  # (num_envs, num_patches, hidden_dim)
 
         # Unsqueeze to add a target sequence length dimension for attention
         proprio_encoded = proprio_encoded.unsqueeze(1)  # (num_envs, 1, hidden_dim)
