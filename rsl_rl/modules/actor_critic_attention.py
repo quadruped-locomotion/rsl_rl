@@ -122,7 +122,7 @@ class AttentionEncoder(nn.Module):
             need_weights=need_weights
         ) # Output shape: (num_envs, 1, hidden_dim), (att_scores shape: (num_envs, 1, num_patches)
 
-        out = torch.cat([att_output.squeeze(), proprioception], 1)
+        out = torch.cat([att_output.squeeze((1,2)), proprioception], 1)
         # Final output shape: (num_envs, hidden_dim + num_proprioception_obs)
 
         return out
