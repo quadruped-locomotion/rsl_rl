@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from itertools import chain
 
-from rsl_rl.modules import ActorCritic
+from rsl_rl.modules import ActorCritic, ActorCriticAttention
 from rsl_rl.modules.rnd import RandomNetworkDistillation
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import string_to_callable
@@ -19,12 +19,12 @@ from rsl_rl.utils import string_to_callable
 class PPO:
     """Proximal Policy Optimization algorithm (https://arxiv.org/abs/1707.06347)."""
 
-    policy: ActorCritic
+    policy: ActorCritic | ActorCriticAttention
     """The actor critic module."""
 
     def __init__(
         self,
-        policy,
+        policy: ActorCritic | ActorCriticAttention,
         num_learning_epochs=1,
         num_mini_batches=1,
         clip_param=0.2,
@@ -43,6 +43,8 @@ class PPO:
         rnd_cfg: dict | None = None,
         # Symmetry parameters
         symmetry_cfg: dict | None = None,
+        # Inverse Model parameters
+        inverse_model_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
     ):
@@ -90,6 +92,9 @@ class PPO:
             self.symmetry = symmetry_cfg
         else:
             self.symmetry = None
+
+        # Inverse Model components
+        self.inverse_model = inverse_model_cfg
 
         # PPO components
         self.policy = policy
@@ -199,6 +204,11 @@ class PPO:
             mean_symmetry_loss = 0
         else:
             mean_symmetry_loss = None
+        # -- Inverse Model loss
+        if self.inverse_model: 
+            mean_inverse_model_loss = 0
+        else:
+            mean_inverse_model_loss = None
 
         # generator for mini batches
         if self.policy.is_recurrent:
@@ -210,7 +220,10 @@ class PPO:
         for (
             obs_batch,
             critic_obs_batch,
+            prev_obs_batch,
             actions_batch,
+            prev_actions_batch,
+            mask_batch,
             target_values_batch,
             advantages_batch,
             returns_batch,
@@ -325,6 +338,19 @@ class PPO:
 
             loss = surrogate_loss + self.value_loss_coef * value_loss - self.entropy_coef * entropy_batch.mean()
 
+            # Inverse Model loss
+            if self.inverse_model:
+                action_hat = self.policy.inverse_model(obs_batch, prev_obs_batch)
+
+                # MSE loss for inverse model
+                inverse_model_loss = (prev_actions_batch - action_hat).pow(2)[mask_batch].mean()
+
+                # Add inverse model loss to the total loss
+                loss += inverse_model_loss * self.inverse_model["loss_coeff"]
+                
+                # Store the inverse model loss
+                inverse_model_loss = inverse_model_loss.detach()
+
             # Symmetry loss
             if self.symmetry:
                 # obtain the symmetric actions
@@ -400,6 +426,9 @@ class PPO:
             # -- Symmetry loss
             if mean_symmetry_loss is not None:
                 mean_symmetry_loss += symmetry_loss.item()
+            # -- Inverse Model loss
+            if mean_inverse_model_loss is not None: 
+                mean_inverse_model_loss += inverse_model_loss.item()
 
         # -- For PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -412,6 +441,10 @@ class PPO:
         # -- For Symmetry
         if mean_symmetry_loss is not None:
             mean_symmetry_loss /= num_updates
+        # -- For Inverse Model
+        if mean_inverse_model_loss is not None:
+            mean_inverse_model_loss /= num_updates
+
         # -- Clear the storage
         self.storage.clear()
 
@@ -425,6 +458,8 @@ class PPO:
             loss_dict["rnd"] = mean_rnd_loss
         if self.symmetry:
             loss_dict["symmetry"] = mean_symmetry_loss
+        if self.inverse_model:
+            loss_dict["inverse_model"] = mean_inverse_model_loss
 
         return loss_dict
 

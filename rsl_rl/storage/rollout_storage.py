@@ -52,6 +52,11 @@ class RolloutStorage:
 
         # Core
         self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
+        self.prev_observations = torch.zeros_like(self.observations, device=self.device)
+
+        self.transition_mask = torch.ones(num_transitions_per_env, num_envs, device=self.device, dtype=torch.bool)
+        self.transition_mask[0, :] = 0  # first transition is always masked out, since it has no previous observation
+
         if privileged_obs_shape is not None:
             self.privileged_observations = torch.zeros(
                 num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device
@@ -60,6 +65,7 @@ class RolloutStorage:
             self.privileged_observations = None
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.prev_actions = torch.zeros_like(self.actions, device=self.device)
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
         # for distillation
@@ -92,12 +98,19 @@ class RolloutStorage:
             raise OverflowError("Rollout buffer overflow! You should call clear() before adding new transitions.")
 
         # Core
+        self.prev_observations[self.step].copy_(self.observations[self.step - 1])
         self.observations[self.step].copy_(transition.observations)
+
         if self.privileged_observations is not None:
             self.privileged_observations[self.step].copy_(transition.privileged_observations)
+
+        self.prev_actions[self.step].copy_(self.actions[self.step - 1])
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
+
+        if self.step < self.num_transitions_per_env - 1:
+            self.transition_mask[self.step + 1].copy_(1 - transition.dones)
 
         # for distillation
         if self.training_type == "distillation":
@@ -190,14 +203,18 @@ class RolloutStorage:
 
         # Core
         observations = self.observations.flatten(0, 1)
+        prev_observations = self.prev_observations.flatten(0, 1)
+
         if self.privileged_observations is not None:
             privileged_observations = self.privileged_observations.flatten(0, 1)
         else:
             privileged_observations = observations
 
         actions = self.actions.flatten(0, 1)
+        prev_actions = self.prev_actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
         returns = self.returns.flatten(0, 1)
+        transitions_mask = self.transition_mask.flatten(0, 1)
 
         # For PPO
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
@@ -222,9 +239,13 @@ class RolloutStorage:
                 privileged_observations_batch = privileged_observations[batch_idx]
                 actions_batch = actions[batch_idx]
 
+                prev_obs_batch = prev_observations[batch_idx]
+                prev_actions_batch = prev_actions[batch_idx]
+
                 # -- For PPO
                 target_values_batch = values[batch_idx]
                 returns_batch = returns[batch_idx]
+                mask_batch = transitions_mask[batch_idx]
                 old_actions_log_prob_batch = old_actions_log_prob[batch_idx]
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
@@ -237,7 +258,7 @@ class RolloutStorage:
                     rnd_state_batch = None
 
                 # yield the mini-batch
-                yield obs_batch, privileged_observations_batch, actions_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
+                yield obs_batch, privileged_observations_batch, prev_obs_batch, actions_batch, prev_actions_batch, mask_batch, target_values_batch, advantages_batch, returns_batch, old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (
                     None,
                     None,
                 ), None, rnd_state_batch

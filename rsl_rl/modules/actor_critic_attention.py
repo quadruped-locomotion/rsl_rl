@@ -12,6 +12,66 @@ from torch.distributions import Normal
 from rsl_rl.utils import resolve_nn_activation
 
 # torch.autograd.set_detect_anomaly(True)
+class DetachLayer(torch.nn.Module):
+    """A layer that detaches the input tensor from the computation graph."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Detach the input tensor."""
+        return x.detach().to(x.device)  # type: ignore[no-any-return]
+
+
+class InverseModel(nn.Module):
+    """Inverse model for predicting actions given two encoded states."""
+    def __init__(self, encoder: AttentionEncoder, input_dim: int, num_actions: int, activation: nn.Module, hidden_dims: tuple[int, ...] = (256, 256)):
+        """Initialize the inverse model.
+
+        Args:
+            encoder (AttentionEncoder): The encoder to use for encoding the states.
+            input_dim (int): The dimension of the encoded states.
+            num_actions (int): The number of actions to predict.
+            hidden_dims (tuple[int, ...], optional): Dimensions of the hidden layers. Defaults to (256, 256).
+            activation (str, optional): Activation function to use. Defaults to "elu".
+        """
+        super().__init__()
+        self.encoder = encoder
+        self.input_dim = input_dim
+        self.num_actions = num_actions
+
+        layers = [nn.Linear(2 * input_dim, hidden_dims[0]), activation]
+
+        for i in range(1, len(hidden_dims)):
+            layers.append(nn.Linear(hidden_dims[i - 1], hidden_dims[i]))
+            layers.append(activation)
+
+        # Final layer to predict the action
+        layers.append(nn.Linear(hidden_dims[-1], num_actions))
+
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, cur_state: torch.Tensor, prev_state: torch.Tensor) -> torch.Tensor:
+        """Predict the action given the current and previous states.
+
+        Args:
+            cur_state (torch.Tensor): The current state tensor.
+            prev_state (torch.Tensor): The previous state tensor.
+        Returns:
+            torch.Tensor: The predicted action tensor.
+        """
+
+        assert cur_state.shape == prev_state.shape, \
+            f"Current state shape {cur_state.shape} does not match previous state shape {prev_state.shape}."
+
+        # Encode the states
+        cur_encoding = self.encoder(cur_state)
+        prev_encoding = self.encoder(prev_state)
+
+        # Concatenate the encoded states
+        encodings = torch.cat([cur_encoding, prev_encoding], dim=-1)
+
+        # Predict the action
+        action = self.model(encodings)
+        return action
+
 
 class AttentionEncoder(nn.Module):
     def __init__(
@@ -80,7 +140,6 @@ class AttentionEncoder(nn.Module):
         self.att_scores: torch.Tensor | None = None  # Placeholder for attention scores
 
 
-
     def forward(self, input: torch.Tensor, need_weights: bool = False) -> torch.Tensor:
         proprioception: torch.Tensor = input[:, :self.exteroception_offset]  # (num_envs, num_proprioception_obs)
         exteroception: torch.Tensor = input[:, self.exteroception_offset:]  # (num_envs, num_exteroception_obs)
@@ -141,6 +200,7 @@ class ActorCriticAttention(nn.Module):
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
+        encoding_dim: int = 64,
         **kwargs,
     ):
         if kwargs:
@@ -155,13 +215,14 @@ class ActorCriticAttention(nn.Module):
             exteroception_offset += num_actor_obs  # Allow negative indexing
         assert 0 < exteroception_offset < num_actor_obs, "exteroception_offset must be a valid index within the input vector."
 
-        self.encoder = AttentionEncoder(num_actor_obs, exteroception_offset, exteroception_dims, grid_idx, hidden_dim=64)
+        self.encoder = AttentionEncoder(num_actor_obs, exteroception_offset, exteroception_dims, grid_idx, hidden_dim=encoding_dim)
 
         # The encoder outputs a tensor of shape (num_envs, 64 + exteroception_offset)
         self.actor = nn.Sequential(
             self.encoder,
             activation,
-            nn.Linear(64 + exteroception_offset, 256),
+            DetachLayer(),  # Detach the output from the computation graph
+            nn.Linear(encoding_dim + exteroception_offset, 256),
             activation,
             nn.Linear(256, 256),
             activation,
@@ -171,16 +232,27 @@ class ActorCriticAttention(nn.Module):
         # The critic also uses the same encoder, but outputs a single value
         # The input to the critic is the same as the actor, so we can reuse the encoder
         self.critic = nn.Sequential(
+            self.encoder,
             activation,
-            nn.Linear(64 + exteroception_offset, 256),
+            DetachLayer(),  # Detach the output from the computation graph
+            nn.Linear(encoding_dim + exteroception_offset, 256),
             activation,
             nn.Linear(256, 256),
             activation,
             nn.Linear(256, 1),
         )
 
-        print(f"Actor MLP: {self.actor}")
-        print(f"Critic MLP: {self.critic}")
+        self.inverse_model = InverseModel(
+            encoder=self.encoder,
+            input_dim=encoding_dim + exteroception_offset,
+            num_actions=num_actions,
+            hidden_dims=(256, 256),
+            activation=activation
+        )
+
+        print(f"Actor: {self.actor}")
+        print(f"Critic: {self.critic}")
+        print(f"Inverse Model: {self.inverse_model}")
 
         # Action noise
         self.noise_std_type = noise_std_type
@@ -244,9 +316,6 @@ class ActorCriticAttention(nn.Module):
         return actions_mean
 
     def evaluate(self, critic_observations, **kwargs):
-        with torch.no_grad():
-            critic_observations = self.encoder(critic_observations)
-
         value = self.critic(critic_observations)
         return value
 

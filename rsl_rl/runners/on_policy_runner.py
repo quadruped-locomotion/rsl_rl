@@ -48,7 +48,6 @@ class OnPolicyRunner:
 
         # evaluate the policy class
         self.policy_class = eval(self.policy_cfg.pop("class_name"))
-        self.policy_class = eval('ActorCriticAttention')
 
         # resolve dimensions of observations
         obs, extras = self.env.get_observations()
@@ -553,24 +552,3 @@ class OnPolicyRunner:
         # set device to the local rank
         torch.cuda.set_device(self.gpu_local_rank)
 
-    def obs_fn(self, obs, extras) -> torch.Tensor:
-        """Handle observations and add height scan if available."""
-
-        height_scan: Optional[torch.Tensor] = None
-
-        obs = obs.to(self.device)  # move observations to the device
-
-        if 'observations' in extras and 'exteroception' in extras['observations']:
-            height_scan = extras['observations']['exteroception'].to(self.device)
-
-        if self.policy_class is ActorCriticAttention:
-            if height_scan is None:
-                raise ValueError("Height scan is required for ActorCriticAttention policy.")
-            else:
-                obs = torch.nested.nested_tensor([obs.unsqueeze(-1).unsqueeze(-1), height_scan])
-                return obs
-        else:
-            if height_scan is not None:
-                height_scan = height_scan.reshape(obs.shape[0], -1)
-                obs = torch.cat((obs, height_scan), dim=1)  # add height scan to observations
-            return obs
