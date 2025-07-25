@@ -22,7 +22,7 @@ class DetachLayer(torch.nn.Module):
 
 class InverseModel(nn.Module):
     """Inverse model for predicting actions given two encoded states."""
-    def __init__(self, encoder: AttentionEncoder, input_dim: int, num_actions: int, activation: nn.Module, hidden_dims: tuple[int, ...] = (256, 256)):
+    def __init__(self, encoder: AttentionEncoder, encoding_dim: int, proprioception_dim: int, num_actions: int, activation: nn.Module, hidden_dims: tuple[int, ...] = (256, 256)):
         """Initialize the inverse model.
 
         Args:
@@ -34,10 +34,11 @@ class InverseModel(nn.Module):
         """
         super().__init__()
         self.encoder = encoder
-        self.input_dim = input_dim
+        self.encoding_dim = encoding_dim 
+        self.proprioception_dim = proprioception_dim
         self.num_actions = num_actions
 
-        layers = [nn.Linear(2 * input_dim, hidden_dims[0]), activation]
+        layers = [nn.Linear(proprioception_dim + 2 * encoding_dim, hidden_dims[0]), activation]
 
         for i in range(1, len(hidden_dims)):
             layers.append(nn.Linear(hidden_dims[i - 1], hidden_dims[i]))
@@ -62,8 +63,11 @@ class InverseModel(nn.Module):
             f"Current state shape {cur_state.shape} does not match previous state shape {prev_state.shape}."
 
         # Encode the states
-        cur_encoding = self.encoder(cur_state)
-        prev_encoding = self.encoder(prev_state)
+        cur_encoding = self.encoder(cur_state, keep_proprioception=False)  # Encode the current state without proprioception
+        # Mask out the action as it is what we want to predict
+
+        # Compute the action offset
+        prev_encoding = self.encoder(prev_state)  # Detach the previous state encoding from the computation graph
 
         # Concatenate the encoded states
         encodings = torch.cat([cur_encoding, prev_encoding], dim=-1)
@@ -140,7 +144,7 @@ class AttentionEncoder(nn.Module):
         self.att_scores: torch.Tensor | None = None  # Placeholder for attention scores
 
 
-    def forward(self, input: torch.Tensor, need_weights: bool = False) -> torch.Tensor:
+    def forward(self, input: torch.Tensor, need_weights: bool = False, keep_proprioception: bool = True) -> torch.Tensor:
         proprioception: torch.Tensor = input[:, :self.exteroception_offset]  # (num_envs, num_proprioception_obs)
         exteroception: torch.Tensor = input[:, self.exteroception_offset:]  # (num_envs, num_exteroception_obs)
         num_envs = input.shape[0]
@@ -181,8 +185,9 @@ class AttentionEncoder(nn.Module):
             need_weights=need_weights
         ) # Output shape: (num_envs, 1, hidden_dim), (att_scores shape: (num_envs, 1, num_patches)
 
-        out = torch.cat([att_output.squeeze((1,2)), proprioception], 1)
-        # Final output shape: (num_envs, hidden_dim + num_proprioception_obs)
+        if keep_proprioception:
+            out = torch.cat([att_output.squeeze((1,2)), proprioception], 1)
+            # Final output shape: (num_envs, hidden_dim + num_proprioception_obs)
 
         return out
 
@@ -244,7 +249,8 @@ class ActorCriticAttention(nn.Module):
 
         self.inverse_model = InverseModel(
             encoder=self.encoder,
-            input_dim=encoding_dim + exteroception_offset,
+            encoding_dim=encoding_dim,
+            proprioception_dim=exteroception_offset,
             num_actions=num_actions,
             hidden_dims=(256, 256),
             activation=activation
