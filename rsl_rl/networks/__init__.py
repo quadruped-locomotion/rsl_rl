@@ -5,6 +5,7 @@
 
 """Definitions for components of modules."""
 
+from .attention_encoder import AttentionEncoder
 from .memory import Memory
 from .mlp import MLP
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
