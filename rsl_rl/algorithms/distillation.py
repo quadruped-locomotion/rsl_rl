@@ -6,7 +6,7 @@
 import torch
 import torch.nn as nn
 
-from rsl_rl.modules import StudentTeacher, StudentTeacherRecurrent
+from rsl_rl.modules import StudentTeacher, StudentTeacherAttention, StudentTeacherRecurrent
 from rsl_rl.storage import RolloutStorage
 from rsl_rl.utils import resolve_optimizer
 
@@ -14,7 +14,7 @@ from rsl_rl.utils import resolve_optimizer
 class Distillation:
     """Distillation algorithm for training a student model to mimic a teacher model."""
 
-    policy: StudentTeacher | StudentTeacherRecurrent
+    policy: StudentTeacher | StudentTeacherAttention | StudentTeacherRecurrent
     """The student teacher model."""
 
     def __init__(
