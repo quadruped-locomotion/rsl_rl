@@ -14,7 +14,7 @@ from rsl_rl.networks import MLP, EmpiricalNormalization, AttentionEncoder
 
 
 class StudentTeacherAttention(nn.Module):
-    is_recurrent = True
+    is_recurrent = False
 
     def __init__(
         self,
@@ -57,7 +57,7 @@ class StudentTeacherAttention(nn.Module):
             num_teacher_obs += obs[obs_group].shape[-1]
 
         # student encoder + MLP
-        self.encoder_s = AttentionEncoder(
+        self.encoder = AttentionEncoder(
             num_student_obs,
             exteroception_offset=exteroception_offset,
             exteroception_dims=exteroception_dims,
@@ -76,7 +76,7 @@ class StudentTeacherAttention(nn.Module):
         else:
             self.student_obs_normalizer = torch.nn.Identity()
 
-        print(f"Student encoder: {self.encoder_s}")
+        print(f"Student encoder: {self.encoder}")
         print(f"Student MLP: {self.student}")
 
         self.teacher = MLP(num_teacher_obs, num_actions, teacher_hidden_dims, activation)
@@ -138,14 +138,14 @@ class StudentTeacherAttention(nn.Module):
     def act(self, obs):
         obs = self.get_student_obs(obs)
         obs = self.student_obs_normalizer(obs)
-        out_mem = self.encoder_s(obs).squeeze(0)
+        out_mem = self.encoder(obs).squeeze(0)
         self.update_distribution(out_mem)
         return self.distribution.sample()
 
     def act_inference(self, obs):
         obs = self.get_student_obs(obs)
         obs = self.student_obs_normalizer(obs)
-        out_mem = self.encoder_s(obs).squeeze(0)
+        out_mem = self.encoder(obs).squeeze(0)
         return self.student(out_mem)
 
     def evaluate(self, obs):

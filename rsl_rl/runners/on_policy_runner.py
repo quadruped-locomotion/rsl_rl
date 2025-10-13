@@ -15,7 +15,7 @@ from collections import deque
 import rsl_rl
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, resolve_rnd_config, resolve_symmetry_config
+from rsl_rl.modules import ActorCritic, ActorCriticRecurrent, ActorCriticAttention, resolve_rnd_config, resolve_symmetry_config
 from rsl_rl.utils import resolve_obs_groups, store_code_state
 
 
@@ -416,7 +416,12 @@ class OnPolicyRunner:
 
         # initialize the actor-critic
         actor_critic_class = eval(self.policy_cfg.pop("class_name"))
-        actor_critic: ActorCritic | ActorCriticRecurrent = actor_critic_class(
+
+        if actor_critic_class is ActorCriticAttention:
+            grid_idx: torch.Tensor = self.env.unwrapped.scene['height_scanner'].grid_idx
+            self.policy_cfg['grid_idx'] = grid_idx
+
+        actor_critic: ActorCritic | ActorCriticAttention | ActorCriticRecurrent = actor_critic_class(
             obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg
         ).to(self.device)
 
