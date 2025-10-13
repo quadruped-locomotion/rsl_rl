@@ -13,7 +13,7 @@ from collections import deque
 import rsl_rl
 from rsl_rl.algorithms import Distillation
 from rsl_rl.env import VecEnv
-from rsl_rl.modules import StudentTeacher, StudentTeacherRecurrent
+from rsl_rl.modules import StudentTeacher, StudentTeacherAttention, StudentTeacherRecurrent
 from rsl_rl.runners import OnPolicyRunner
 from rsl_rl.utils import resolve_obs_groups, store_code_state
 
@@ -157,7 +157,12 @@ class DistillationRunner(OnPolicyRunner):
         """Construct the distillation algorithm."""
         # initialize the actor-critic
         student_teacher_class = eval(self.policy_cfg.pop("class_name"))
-        student_teacher: StudentTeacher | StudentTeacherRecurrent = student_teacher_class(
+
+        if student_teacher_class is StudentTeacherAttention:
+            grid_idx: torch.Tensor = self.env.unwrapped.scene['height_scanner'].grid_idx
+            self.policy_cfg['grid_idx'] = grid_idx
+
+        student_teacher: StudentTeacher | StudentTeacherAttention | StudentTeacherRecurrent = student_teacher_class(
             obs, self.cfg["obs_groups"], self.env.num_actions, **self.policy_cfg
         ).to(self.device)
 
