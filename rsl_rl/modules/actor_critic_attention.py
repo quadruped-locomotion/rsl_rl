@@ -181,8 +181,7 @@ class ActorCriticAttention(nn.Module):
         obs = self.get_critic_obs(obs)
         obs = self.critic_obs_normalizer(obs)
 
-        with torch.no_grad():
-            out_enc = self.encoder(obs).squeeze(0)
+        out_enc = self.encoder(obs).squeeze(0)
 
         return self.critic(out_enc)
 
