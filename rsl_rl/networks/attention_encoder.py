@@ -78,9 +78,12 @@ class AttentionEncoder(nn.Module):
         )
 
         self.att_scores: torch.Tensor | None = None  # Placeholder for attention scores
+        self.bfloat16()
+        self.grid_idx = self.grid_idx.bfloat16()
 
 
     def forward(self, input: torch.Tensor, need_weights: bool = False) -> torch.Tensor:
+        input = input.bfloat16()
         proprioception: torch.Tensor = input[:, :self.exteroception_offset]  # (num_envs, num_proprioception_obs)
         exteroception: torch.Tensor = input[:, self.exteroception_offset:]  # (num_envs, num_exteroception_obs)
         num_envs = input.shape[0]
@@ -126,4 +129,4 @@ class AttentionEncoder(nn.Module):
         out = torch.cat([att_output.squeeze((1,2)), proprioception], 1)
         # Final output shape: (num_envs, hidden_dim + num_proprioception_obs)
 
-        return out
+        return out.float()
