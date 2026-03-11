@@ -6,6 +6,17 @@
 """Definitions for components of modules."""
 
 from .attention_encoder import AttentionEncoder
-from .memory import Memory
+from .cnn import CNN
+from .memory import HiddenState, Memory
 from .mlp import MLP
 from .normalization import EmpiricalDiscountedVariationNormalization, EmpiricalNormalization
+
+__all__ = [
+    "AttentionEncoder",
+    "CNN",
+    "MLP",
+    "EmpiricalDiscountedVariationNormalization",
+    "EmpiricalNormalization",
+    "HiddenState",
+    "Memory",
+]
