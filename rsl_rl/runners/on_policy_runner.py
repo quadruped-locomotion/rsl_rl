@@ -13,7 +13,7 @@ from tensordict import TensorDict
 
 from rsl_rl.algorithms import PPO
 from rsl_rl.env import VecEnv
-from rsl_rl.utils import resolve_obs_groups, store_code_state
+from rsl_rl.utils import resolve_obs_groups
 from rsl_rl.modules import (
     ActorCritic,
     ActorCriticAttention,
@@ -268,7 +268,6 @@ class OnPolicyRunner:
             if self.policy_cfg.get("critic_obs_normalization") is None:
                 self.policy_cfg["critic_obs_normalization"] = self.cfg["empirical_normalization"]
 
-<<<<<<< HEAD
         # initialize the actor-critic
         actor_critic_class = resolve_callable(self.policy_cfg.pop("class_name"))
 
