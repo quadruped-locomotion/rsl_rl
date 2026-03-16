@@ -8,25 +8,26 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import warnings
+from tensordict import TensorDict
 from torch.distributions import Normal
+from typing import Any
 
 from rsl_rl.networks import AttentionEncoder, MLP, EmpiricalNormalization
+from .actor_critic import ActorCritic
 
 
-class ActorCriticAttention(nn.Module):
-    is_recurrent = False
-
+class ActorCriticAttention(ActorCritic):
     def __init__(
         self,
-        obs,
-        obs_groups,
-        num_actions,
+        obs: TensorDict,
+        obs_groups: dict[str, list[str]],
+        num_actions: int,
         grid_idx: torch.Tensor,
         actor_obs_normalization: bool = False,
         critic_obs_normalization: bool = False,
         actor_hidden_dims: list[int] = [256, 256, 256],
-        critic_hidden_dims: list[int] = [512, 256, 128], # TODO: single source of truth
-        exteroception_dims: tuple[int, int] = (25, 16), # TODO: single source of truth
+        critic_hidden_dims: list[int] = [512, 256, 128],
+        exteroception_dims: tuple[int, int] = (25, 16),
         attention_hidden_dim: int = 64,
         attention_heads: int = 8,
         activation: str = "elu",
@@ -40,34 +41,49 @@ class ActorCriticAttention(nn.Module):
                 "ActorCriticAttention.__init__ got unexpected arguments, which will be ignored: "
                 + str(kwargs.keys()),
             )
-        super().__init__()
+        super(ActorCritic, self).__init__()
 
         assert actor_obs_normalization == critic_obs_normalization, "Actor and critic obs normalization must be the same for attention model."
 
-        exteroception_offset = -exteroception_dims[0] * exteroception_dims[1]
+        self.exteroception_dims = exteroception_dims
 
         # get the observation dimensions
         self.obs_groups = obs_groups
-        num_student_obs = 0
+        num_actor_obs_1d = 0
+        self.actor_obs_groups_1d = []
+        self.actor_obs_groups_extero = []
+
         for obs_group in obs_groups["policy"]:
-            assert len(obs[obs_group].shape) == 2, "The ActorCriticAttention module only supports 1D observations."
-            num_student_obs += obs[obs_group].shape[-1]
-        num_critic_obs = 0
+            if len(obs[obs_group].shape) > 2 or (len(obs[obs_group].shape) == 2 and obs[obs_group].shape[-1] == exteroception_dims[0] * exteroception_dims[1]):
+                self.actor_obs_groups_extero.append(obs_group)
+            elif len(obs[obs_group].shape) == 2:
+                self.actor_obs_groups_1d.append(obs_group)
+                num_actor_obs_1d += obs[obs_group].shape[-1]
+            else:
+                raise ValueError(f"Invalid observation shape for {obs_group}: {obs[obs_group].shape}")
+
+        num_critic_obs_1d = 0
+        self.critic_obs_groups_1d = []
+        self.critic_obs_groups_extero = []
+
         for obs_group in obs_groups["critic"]:
-            assert len(obs[obs_group].shape) == 2, "The ActorCriticAttention module only supports 1D observations."
-            num_critic_obs += obs[obs_group].shape[-1]
+            if len(obs[obs_group].shape) > 2 or (len(obs[obs_group].shape) == 2 and obs[obs_group].shape[-1] == exteroception_dims[0] * exteroception_dims[1]):
+                self.critic_obs_groups_extero.append(obs_group)
+            elif len(obs[obs_group].shape) == 2:
+                self.critic_obs_groups_1d.append(obs_group)
+                num_critic_obs_1d += obs[obs_group].shape[-1]
+            else:
+                raise ValueError(f"Invalid observation shape for {obs_group}: {obs[obs_group].shape}")
 
         # student encoder + MLP
         self.encoder = AttentionEncoder(
-            num_student_obs,
-            exteroception_offset=exteroception_offset,
+            num_proprio_obs=num_actor_obs_1d,
             exteroception_dims=exteroception_dims,
             hidden_dim=attention_hidden_dim,
             num_heads=attention_heads,
             grid_idx=grid_idx
         )
-        num_query = exteroception_offset if exteroception_offset > 0 else num_student_obs + exteroception_offset
-        mlp_input_dim = num_query + attention_hidden_dim
+        mlp_input_dim = num_actor_obs_1d + attention_hidden_dim
 
         self.state_dependent_std = state_dependent_std
 
@@ -79,7 +95,7 @@ class ActorCriticAttention(nn.Module):
         # student observation normalization
         self.actor_obs_normalization = actor_obs_normalization
         if actor_obs_normalization:
-            self.actor_obs_normalizer = EmpiricalNormalization(num_student_obs)
+            self.actor_obs_normalizer = EmpiricalNormalization(num_actor_obs_1d)
         else:
             self.actor_obs_normalizer = torch.nn.Identity()
 
@@ -99,6 +115,11 @@ class ActorCriticAttention(nn.Module):
 
         # Action noise
         self.noise_std_type = noise_std_type
+        if isinstance(init_noise_std, dict) or init_noise_std is None:
+            init_noise_std = 1.0  # default
+        else:
+            init_noise_std = float(init_noise_std)
+
         if self.state_dependent_std:
             torch.nn.init.zeros_(self.actor[-2].weight[num_actions:])
             if self.noise_std_type == "scalar":
@@ -117,115 +138,80 @@ class ActorCriticAttention(nn.Module):
             else:
                 raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
 
-        # action distribution (populated in update_distribution)
+        # action distribution
         self.distribution = None
-        # disable args validation for speedup
         Normal.set_default_validate_args(False)
 
-    @property
-    def action_mean(self):
-        return self.distribution.mean
-
-    @property
-    def action_std(self):
-        return self.distribution.stddev
-
-    @property
-    def entropy(self):
-        return self.distribution.entropy().sum(dim=-1)
-
-    def reset(self, dones=None):
-        pass
-
-    def forward(self):
-        raise NotImplementedError
-
-    def update_distribution(self, obs):
-        if self.state_dependent_std:
-            # compute mean and standard deviation
-            mean_and_std = self.actor(obs)
-            if self.noise_std_type == "scalar":
-                mean, std = torch.unbind(mean_and_std, dim=-2)
-            elif self.noise_std_type == "log":
-                mean, log_std = torch.unbind(mean_and_std, dim=-2)
-                std = torch.exp(log_std)
-            else:
-                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
+    def _update_distribution(self, mlp_obs: torch.Tensor, extero_obs: dict[str, torch.Tensor]) -> None:
+        if self.actor_obs_groups_extero:
+            extero_tensors = [extero_obs[group] for group in self.actor_obs_groups_extero]
+            extero = torch.cat(extero_tensors, dim=-1)
+            out_enc = self.encoder(mlp_obs, extero).squeeze(0)
         else:
-            # compute mean
-            mean = self.actor(obs)
-            # compute standard deviation
-            if self.noise_std_type == "scalar":
-                std = self.std.expand_as(mean)
-            elif self.noise_std_type == "log":
-                std = torch.exp(self.log_std).expand_as(mean)
-            else:
-                raise ValueError(f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'")
-        # create distribution
-        self.distribution = Normal(mean, std)
+            # Fallback if no exteroception
+            out_enc = mlp_obs
 
-    def act(self, obs, **kwargs):
-        obs = self.get_actor_obs(obs)
-        obs = self.actor_obs_normalizer(obs)
-        out_enc = self.encoder(obs).squeeze(0)
-        self.update_distribution(out_enc)
+        super()._update_distribution(out_enc)
+
+    def act(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
+        mlp_obs, extero_obs = self.get_actor_obs(obs)
+        mlp_obs = self.actor_obs_normalizer(mlp_obs)
+        self._update_distribution(mlp_obs, extero_obs)
         return self.distribution.sample()
 
-    def act_inference(self, obs):
-        obs = self.get_actor_obs(obs)
-        obs = self.actor_obs_normalizer(obs)
-        out_enc = self.encoder(obs).squeeze(0)
-        return self.actor(out_enc)
+    def act_inference(self, obs: TensorDict) -> torch.Tensor:
+        mlp_obs, extero_obs = self.get_actor_obs(obs)
+        mlp_obs = self.actor_obs_normalizer(mlp_obs)
 
-    def evaluate(self, obs, **kwargs):
-        obs = self.get_critic_obs(obs)
-        obs = self.critic_obs_normalizer(obs)
+        if self.actor_obs_groups_extero:
+            extero_tensors = [extero_obs[group] for group in self.actor_obs_groups_extero]
+            extero = torch.cat(extero_tensors, dim=-1)
+            out_enc = self.encoder(mlp_obs, extero).squeeze(0)
+        else:
+            out_enc = mlp_obs
 
-        out_enc = self.encoder(obs).squeeze(0)
+        if self.state_dependent_std:
+            return self.actor(out_enc)[..., 0, :]
+        else:
+            return self.actor(out_enc)
+
+    def evaluate(self, obs: TensorDict, **kwargs: dict[str, Any]) -> torch.Tensor:
+        mlp_obs, extero_obs = self.get_critic_obs(obs)
+        mlp_obs = self.critic_obs_normalizer(mlp_obs)
+
+        if self.critic_obs_groups_extero:
+            extero_tensors = [extero_obs[group] for group in self.critic_obs_groups_extero]
+            extero = torch.cat(extero_tensors, dim=-1)
+            out_enc = self.encoder(mlp_obs, extero).squeeze(0)
+        else:
+            out_enc = mlp_obs
 
         return self.critic(out_enc)
 
-    def get_actor_obs(self, obs):
-        obs_list = []
-        for obs_group in self.obs_groups["policy"]:
-            obs_list.append(obs[obs_group])
-        return torch.cat(obs_list, dim=-1)
+    def get_actor_obs(self, obs: TensorDict) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        obs_list_1d = [obs[obs_group] for obs_group in self.actor_obs_groups_1d]
+        obs_dict_extero = {}
+        for obs_group in self.actor_obs_groups_extero:
+            obs_dict_extero[obs_group] = obs[obs_group]
+        return torch.cat(obs_list_1d, dim=-1) if obs_list_1d else torch.empty(obs.shape[0], 0, device=obs.device), obs_dict_extero
 
-    def get_critic_obs(self, obs):
-        obs_list = []
-        for obs_group in self.obs_groups["critic"]:
-            obs_list.append(obs[obs_group])
-        return torch.cat(obs_list, dim=-1)
+    def get_critic_obs(self, obs: TensorDict) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        obs_list_1d = [obs[obs_group] for obs_group in self.critic_obs_groups_1d]
+        obs_dict_extero = {}
+        for obs_group in self.critic_obs_groups_extero:
+            obs_dict_extero[obs_group] = obs[obs_group]
+        return torch.cat(obs_list_1d, dim=-1) if obs_list_1d else torch.empty(obs.shape[0], 0, device=obs.device), obs_dict_extero
 
-    def get_actions_log_prob(self, actions):
-        return self.distribution.log_prob(actions).sum(dim=-1)
-
-    def get_hidden_states(self):
-        raise NotImplementedError
-
-    def update_normalization(self, obs):
+    def update_normalization(self, obs: TensorDict) -> None:
         if self.actor_obs_normalization:
-            actor_obs = self.get_actor_obs(obs)
+            actor_obs, _ = self.get_actor_obs(obs)
             self.actor_obs_normalizer.update(actor_obs)
         if self.critic_obs_normalization:
-            critic_obs = self.get_critic_obs(obs)
+            critic_obs, _ = self.get_critic_obs(obs)
             self.critic_obs_normalizer.update(critic_obs)
 
     def load_state_dict(self, state_dict, strict=True):
-        """Load the parameters of the actor-critic model.
-
-        Args:
-            state_dict (dict): State dictionary of the model.
-            strict (bool): Whether to strictly enforce that the keys in state_dict match the keys returned by this
-                           module's state_dict() function.
-
-        Returns:
-            bool: Whether this training resumes a previous training. This flag is used by the `load()` function of
-                  `OnPolicyRunner` to determine how to load further parameters (relevant for, e.g., distillation).
-        """
-
         if any("encoder_s" in key for key in state_dict.keys()):
-            # rename keys to match encoder
             warnings.warn(
                 "The state_dict contains keys for 'encoder_s', which indicates that the checkpoint was saved with an older version of the code. The keys will be renamed to 'encoder'."
             )
@@ -258,11 +244,9 @@ class ActorCriticAttention(nn.Module):
             warnings.warn(
                 "Loading actor parameters from distillation training. The critic network will be randomly initialized (except for the shared encoder)."
             )
-
+            return True
         else:
             warnings.warn(
                 "Loading actor-critic parameters from RL training. If you want to load parameters from distillation training, please make sure you are choosing the correct checkpoint."
             )
-            super().load_state_dict(state_dict, strict=strict)
-
-        return True
+            return super().load_state_dict(state_dict, strict=strict)
