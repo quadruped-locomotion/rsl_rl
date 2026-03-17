@@ -78,7 +78,7 @@ class StudentTeacherAttention(nn.Module):
             num_heads=attention_heads,
             grid_idx=grid_idx
         )
-        mlp_input_dim_s = num_student_obs_1d + attention_hidden_dim
+        mlp_input_dim_s = num_student_obs_1d + 2 * attention_hidden_dim
         self.student = MLP(mlp_input_dim_s, num_actions, student_hidden_dims, activation)
 
         # student observation normalization
